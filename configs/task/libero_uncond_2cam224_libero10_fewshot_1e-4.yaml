@@ -1,0 +1,90 @@
+# @package _global_
+
+# Few-shot fine-tune Fast-WAM UNCOND on LIBERO_10.
+# By default, keep the first 5 demos per task.
+defaults:
+  - override /data: libero_2cam
+  - override /model: fastwam
+  - _self_
+
+# dataloading
+batch_size: 8
+num_workers: 2
+gradient_accumulation_steps: 2
+
+# Controls how many demos are used per task.
+# Set to 1/2/5/etc. from the command line if you want another few-shot setting.
+fewshot_demos_per_task: 5
+
+data:
+  train:
+    _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+    dataset_dirs:
+      - ./data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+    shape_meta:
+      images:
+        - key: image
+          raw_shape: [3, 512, 512]
+          shape: [3, 224, 224]
+        - key: wrist_image
+          raw_shape: [3, 512, 512]
+          shape: [3, 224, 224]
+      action:
+        - key: default
+          raw_shape: 7
+          shape: 7
+      state:
+        - key: default
+          raw_shape: 8
+          shape: 8
+    num_frames: 33
+    global_sample_stride: 1
+    action_video_freq_ratio: 4
+    video_size: [224, 448]
+    camera_key: null
+    val_set_proportion: 0.0
+    is_training_set: true
+    skip_padding_as_possible: false
+    concat_multi_camera: horizontal
+    max_episodes_per_task: ${fewshot_demos_per_task}
+    processor:
+      _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
+      shape_meta: ${data.train.shape_meta}
+      num_obs_steps: ${data.train.num_frames}
+      num_output_cameras: 2
+      action_output_dim: 7
+      proprio_output_dim: 8
+      delta_action_dim_mask:
+        default: [true, true, true, true, true, true, false]
+      action_state_transforms: null
+      use_stepwise_action_norm: false
+      norm_default_mode: min/max
+      norm_exception_mode: null
+      action_state_merger:
+        _target_: fastwam.datasets.lerobot.transforms.action_state_merger.ConcatLeftAlign
+      train_transforms:
+        - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+        - _target_: torchvision.transforms.Resize
+          size: [224, 224]
+      val_transforms:
+        - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+        - _target_: torchvision.transforms.Resize
+          size: [224, 224]
+    text_embedding_cache_dir: ./data/text_embeds_cache/libero
+    context_len: 128
+
+model:
+  mot_checkpoint_mixed_attn: false
+
+# scheduler
+lr_scheduler_type: cosine
+learning_rate: 1e-4
+num_epochs: 10
+max_steps: null
+log_every: 10
+save_every: 2000
+eval_every: 200
+
+# training
+weight_decay: 1e-2
+resume: checkpoints/my_check/ucond/step_013550.pt

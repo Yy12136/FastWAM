@@ -33,6 +33,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
 
         # sampling
         global_sample_stride: int = 1,
+        selected_tasks: List[str] | None = None,
+        max_episodes_per_task: int | None = None,
     ):
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
@@ -57,6 +59,8 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         fps = fps_list[0]
         
         self.global_sample_stride = global_sample_stride
+        self.selected_tasks = set(selected_tasks) if selected_tasks else None
+        self.max_episodes_per_task = max_episodes_per_task
 
         self.val_set_proportion = val_set_proportion
         self.is_training_set = is_training_set
@@ -100,6 +104,31 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
                     episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx)]})
                 else:
                     episodes.update({meta.repo_id: [episode_indices[i] for i in range(split_idx, meta.total_episodes)]})
+
+        if self.selected_tasks is not None or self.max_episodes_per_task is not None:
+            filtered_episodes = {}
+            for meta in metas:
+                keep = []
+                task_counts = {}
+                for ep_idx in episodes[meta.repo_id]:
+                    episode_meta = meta.episodes[ep_idx]
+                    episode_tasks = episode_meta.get("tasks", [])
+                    if self.selected_tasks is not None and not any(task in self.selected_tasks for task in episode_tasks):
+                        continue
+                    if self.max_episodes_per_task is not None:
+                        hit_limit = False
+                        for task in episode_tasks:
+                            task_counts.setdefault(task, 0)
+                            if task_counts[task] >= self.max_episodes_per_task:
+                                hit_limit = True
+                                break
+                        if hit_limit:
+                            continue
+                        for task in episode_tasks:
+                            task_counts[task] += 1
+                    keep.append(ep_idx)
+                filtered_episodes[meta.repo_id] = keep
+            episodes = filtered_episodes
 
         self.multi_dataset = MultiLeRobotDataset(
             dataset_dirs=self.dataset_dirs,

@@ -335,9 +335,9 @@ run_libero_eval() {
         # When the task exits, write a status file so the scheduler can detect failures promptly.
         tmux select-pane -t $SESSION_NAME:$pane_info 2>/dev/null
         tmux send-keys -t $SESSION_NAME:$pane_info "clear" C-m 2>/dev/null
-        tmux send-keys -t $SESSION_NAME:$pane_info "source ~/.bashrc && cd $ROOT_DIR && export EXP_NAME=$EXP_NAME && \
+        tmux send-keys -t $SESSION_NAME:$pane_info "source /home/xinmiao/miniconda3/etc/profile.d/conda.sh && conda activate fastwam && cd $ROOT_DIR && export EXP_NAME=$EXP_NAME && export PYTHONPATH=$ROOT_DIR/third_party/LIBERO:\$PYTHONPATH && export LD_LIBRARY_PATH=/home/xinmiao/miniconda3/envs/fastwam/lib:\$LD_LIBRARY_PATH && export MUJOCO_GL=egl && export PYOPENGL_PLATFORM=egl && \
             STATUS_FILE='$status_file' LOG_FILE='$log_file' RESULT_FILE='$result_file' && \
-            CUDA_VISIBLE_DEVICES=$gpu_id python experiments/libero/eval_libero_single.py \
+            CUDA_VISIBLE_DEVICES=$gpu_id /home/xinmiao/miniconda3/envs/fastwam/bin/python experiments/libero/eval_libero_single.py \
             task=$CONFIG ckpt=$CKPT \
             EVALUATION.task_suite_name=$suite EVALUATION.task_id=$task_id gpu_id=$gpu_id \
             EVALUATION.num_trials=$NUM_TRIALS EVALUATION.output_dir=$OUTPUT_DIR $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \

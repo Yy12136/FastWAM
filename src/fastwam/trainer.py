@@ -281,18 +281,51 @@ class Wan22Trainer:
         # Match DiffSynth's freeze_except("dit"): only DiT stays trainable/in-train-mode.
         logger.info("Setting DiT to train mode and freezing other model components.")
         model = self.accelerator.unwrap_model(self.model)
-        self._apply_dit_only_train_mode(model)
+        self._apply_dit_only_train_mode(
+            model,
+            freeze_video_expert=bool(getattr(self.cfg.model, "freeze_video_expert", False)),
+            freeze_action_expert=bool(getattr(self.cfg.model, "freeze_action_expert", False)),
+            freeze_proprio_encoder=bool(getattr(self.cfg.model, "freeze_proprio_encoder", False)),
+        )
 
     @staticmethod
-    def _apply_dit_only_train_mode(model):
+    def _apply_dit_only_train_mode(
+        model,
+        freeze_video_expert: bool = False,
+        freeze_action_expert: bool = False,
+        freeze_proprio_encoder: bool = False,
+    ):
         model.eval()
         model.requires_grad_(False)
         model.dit.train()
         model.dit.requires_grad_(True)
+
+        video_expert = getattr(model, "video_expert", None)
+        if video_expert is not None:
+            if freeze_video_expert:
+                video_expert.eval()
+                video_expert.requires_grad_(False)
+            else:
+                video_expert.train()
+                video_expert.requires_grad_(True)
+
+        action_expert = getattr(model, "action_expert", None)
+        if action_expert is not None:
+            if freeze_action_expert:
+                action_expert.eval()
+                action_expert.requires_grad_(False)
+            else:
+                action_expert.train()
+                action_expert.requires_grad_(True)
+
         proprio_encoder = getattr(model, "proprio_encoder", None)
         if proprio_encoder is not None:
-            proprio_encoder.train()
-            proprio_encoder.requires_grad_(True)
+            if freeze_proprio_encoder:
+                proprio_encoder.eval()
+                proprio_encoder.requires_grad_(False)
+            else:
+                proprio_encoder.train()
+                proprio_encoder.requires_grad_(True)
 
     @staticmethod
     def _to_batched_eval_sample(sample):

@@ -42,6 +42,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         max_padding_retry: int = 3,
         concat_multi_camera: str = "horizontal", # "horizontal", "vertical", "robotwin", or None
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
+        selected_tasks: Optional[list[str]] = None,
+        max_episodes_per_task: Optional[int] = None,
     ):
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
@@ -51,6 +53,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             val_set_proportion=val_set_proportion,
             is_training_set=is_training_set,
             global_sample_stride=global_sample_stride,
+            selected_tasks=selected_tasks,
+            max_episodes_per_task=max_episodes_per_task,
         )
     
         self.num_frames = num_frames

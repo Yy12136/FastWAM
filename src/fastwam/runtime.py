@@ -155,6 +155,9 @@ def create_fastwam(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 1.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        freeze_video_expert=bool(freeze_video_expert),
+        freeze_action_expert=bool(freeze_action_expert),
+        freeze_proprio_encoder=bool(freeze_proprio_encoder),
     )
 
 
@@ -260,6 +263,9 @@ def create_fastwam_idm(
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
+    freeze_video_expert: bool = False,
+    freeze_action_expert: bool = False,
+    freeze_proprio_encoder: bool = False,
 ):
     from .models.wan22.fastwam_idm import (
         FastWAMIDM,
