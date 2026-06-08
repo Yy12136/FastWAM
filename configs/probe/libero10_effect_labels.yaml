@@ -1,0 +1,40 @@
+tasks:
+  0:
+    description: "put both the alphabet soup and the tomato sauce in the basket"
+    labels:
+      - start_ratio: 0.0
+        end_ratio: 0.5
+        effect: "alphabet_soup_table_to_basket"
+        stage: "put_alphabet_soup"
+        target: "alphabet_soup"
+      - start_ratio: 0.5
+        end_ratio: 1.0
+        effect: "tomato_sauce_table_to_basket"
+        stage: "put_tomato_sauce"
+        target: "tomato_sauce"
+  3:
+    description: "put the black bowl in the bottom drawer of the cabinet and close it"
+    labels:
+      - start_ratio: 0.0
+        end_ratio: 0.65
+        effect: "black_bowl_table_to_bottom_drawer"
+        stage: "put_black_bowl"
+        target: "black_bowl"
+      - start_ratio: 0.65
+        end_ratio: 1.0
+        effect: "bottom_drawer_open_to_closed"
+        stage: "close_drawer"
+        target: "bottom_drawer"
+  9:
+    description: "put the yellow and white mug in the microwave and close it"
+    labels:
+      - start_ratio: 0.0
+        end_ratio: 0.65
+        effect: "yellow_white_mug_table_to_microwave"
+        stage: "put_mug"
+        target: "yellow_white_mug"
+      - start_ratio: 0.65
+        end_ratio: 1.0
+        effect: "microwave_door_open_to_closed"
+        stage: "close_microwave"
+        target: "microwave_door"

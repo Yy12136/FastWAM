@@ -409,6 +409,25 @@ class FastWAMIDM(FastWAMJoint):
             action=None,
             fuse_vae_embedding_in_latents=fuse_flag,
         )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=latents_action,
+            timestep=torch.zeros((latents_action.shape[0],), dtype=latents_action.dtype, device=self.device),
+            context=context,
+            context_mask=context_mask,
+        )
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("video_pre", video_pre_cond.get("tokens"))
+            self._maybe_cache_probe_tensor("video_out", latents_video)
+            self._maybe_cache_probe_tensor("action_pre", action_pre.get("tokens"))
+            self._maybe_cache_probe_tensor("context", video_pre_cond.get("context"))
+            if proprio is not None and self.proprio_encoder is not None:
+                try:
+                    self._maybe_cache_probe_tensor(
+                        "proprio_embed",
+                        self.proprio_encoder(proprio.to(device=self.device, dtype=self.torch_dtype)).unsqueeze(1),
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to cache proprio_embed: %s", exc)
         video_seq_len = int(video_pre_cond["tokens"].shape[1])
         attention_mask = self._build_mot_attention_mask(
             video_seq_len=video_seq_len,
@@ -445,6 +464,11 @@ class FastWAMIDM(FastWAMJoint):
                 video_seq_len=video_seq_len,
             )
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+            if self.enable_probe:
+                self._maybe_cache_probe_tensor("action_out", latents_action)
+
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("action_out", latents_action)
 
         return {
             "video": self._decode_latents(latents_video, tiled=tiled),

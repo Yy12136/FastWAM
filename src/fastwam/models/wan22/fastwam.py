@@ -85,6 +85,18 @@ class FastWAM(torch.nn.Module):
         self.loss_lambda_video = float(loss_lambda_video)
         self.loss_lambda_action = float(loss_lambda_action)
 
+        # Optional probe cache; disabled by default to preserve all existing behavior.
+        self.enable_probe = False
+        self._probe_cache: dict[str, torch.Tensor] = {}
+        self._probe_allowed_keys = {
+            "video_pre",
+            "video_out",
+            "action_pre",
+            "action_out",
+            "context",
+            "proprio_embed",
+        }
+
         self.to(self.device)
 
     @classmethod
@@ -238,6 +250,35 @@ class FastWAM(torch.nn.Module):
             torch.cat([context, proprio_token], dim=1),
             torch.cat([context_mask, proprio_mask], dim=1),
         )
+
+    def _reset_probe_cache(self):
+        self._probe_cache = {}
+
+    def _maybe_cache_probe_tensor(self, name: str, tensor: Optional[torch.Tensor]):
+        if not self.enable_probe or tensor is None or name not in self._probe_allowed_keys:
+            return
+        if not isinstance(tensor, torch.Tensor):
+            return
+        try:
+            pooled = tensor.detach().float().cpu()
+            if pooled.ndim <= 1:
+                pooled = pooled.reshape(1, -1)
+            elif pooled.ndim == 2:
+                pass
+            else:
+                dims = tuple(range(1, pooled.ndim - 1))
+                if len(dims) > 0:
+                    pooled = pooled.mean(dim=dims)
+                if pooled.ndim == 1:
+                    pooled = pooled.unsqueeze(0)
+            if pooled.ndim != 2:
+                pooled = pooled.reshape(pooled.shape[0], -1)
+            self._probe_cache[name] = pooled
+        except Exception as exc:
+            logger.warning("Failed to cache probe tensor %s with shape %s: %s", name, tuple(tensor.shape), exc)
+
+    def get_probe_features(self) -> dict[str, torch.Tensor]:
+        return dict(self._probe_cache)
 
     @torch.no_grad()
     def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
@@ -949,6 +990,7 @@ class FastWAM(torch.nn.Module):
                 raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
             proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
 
+        self._reset_probe_cache()
         generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
         latents_action = torch.randn(
             (1, action_horizon, self.action_expert.action_dim),
@@ -1003,6 +1045,27 @@ class FastWAM(torch.nn.Module):
             action=None,
             fuse_vae_embedding_in_latents=fuse_flag,
         )
+        action_pre = self.action_expert.pre_dit(
+            action_tokens=latents_action,
+            timestep=torch.zeros((latents_action.shape[0],), dtype=latents_action.dtype, device=self.device),
+            context=context,
+            context_mask=context_mask,
+        )
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("video_pre", video_pre.get("tokens"))
+            self._maybe_cache_probe_tensor("action_pre", action_pre.get("tokens"))
+            self._maybe_cache_probe_tensor("context", video_pre.get("context"))
+            if proprio is not None and self.proprio_encoder is not None:
+                proprio_tensor = proprio
+                if proprio_tensor.ndim == 1:
+                    proprio_tensor = proprio_tensor.unsqueeze(0)
+                try:
+                    proprio_embed = self.proprio_encoder(
+                        proprio_tensor.to(device=self.device, dtype=self.torch_dtype)
+                    ).unsqueeze(1)
+                    self._maybe_cache_probe_tensor("proprio_embed", proprio_embed)
+                except Exception as exc:
+                    logger.warning("Failed to cache proprio_embed: %s", exc)
         video_seq_len = int(video_pre["tokens"].shape[1])
         attention_mask = self._build_mot_attention_mask(
             video_seq_len=video_seq_len,
@@ -1042,6 +1105,12 @@ class FastWAM(torch.nn.Module):
             pred_action = pred_action_posi
 
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+            if self.enable_probe:
+                self._maybe_cache_probe_tensor("action_out", latents_action)
+                self._maybe_cache_probe_tensor("action_pre", action_pre.get("tokens"))
+
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("action_out", latents_action)
 
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),

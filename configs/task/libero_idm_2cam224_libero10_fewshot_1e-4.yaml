@@ -1,7 +1,7 @@
 # @package _global_
 
-# Few-shot fine-tune Fast-WAM IDM on LIBERO_10.
-# By default, keep the first 5 demos per task.
+# Fine-tune Fast-WAM IDM on LIBERO_10.
+# Default to using all demos per task, while keeping the few-shot switch available.
 defaults:
   - override /data: libero_2cam
   - override /model: fastwam_idm
@@ -13,8 +13,9 @@ num_workers: 2
 gradient_accumulation_steps: 2
 
 # Controls how many demos are used per task.
-# Set to 1/2/5/etc. from the command line if you want another few-shot setting.
-fewshot_demos_per_task: 5
+# Set to 1/2/5/etc. from the command line for few-shot runs.
+# Set to null to use all demos for each task.
+fewshot_demos_per_task: null
 
 data:
   train:
@@ -87,4 +88,4 @@ eval_every: 200
 
 # training
 weight_decay: 1e-2
-resume: checkpoints/my_check/idm/step_013550.pt
+resume: checkpoints/my_check/idm/no_10/step_013550.pt
