@@ -94,6 +94,8 @@ class FastWAM(torch.nn.Module):
             "action_pre",
             "action_out",
             "context",
+            "context_pure",
+            "context_with_proprio",
             "proprio_embed",
         }
 
@@ -761,6 +763,9 @@ class FastWAM(torch.nn.Module):
             attention_mask=attention_mask,
             video_seq_len=video_seq_len,
         )
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("action_pre", action_pre.get("tokens"))
+            self._maybe_cache_probe_tensor("action_out", action_tokens)
         return self.action_expert.post_dit(action_tokens, action_pre)
 
     @torch.no_grad()

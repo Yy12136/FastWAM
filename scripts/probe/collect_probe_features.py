@@ -30,6 +30,12 @@ def parse_args():
     p.add_argument("--stride", type=int, default=5)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--label_config", required=True)
+    p.add_argument("--inference_mode", choices=["idm"], default="idm")
+    p.add_argument(
+        "--representations",
+        default="video_pre,video_out,action_pre,action_out,context_pure,context_with_proprio,proprio_embed",
+    )
+    p.add_argument("--print_feature_shapes", action="store_true")
     p.add_argument("--dry_run", action="store_true")
     return p.parse_args()
 
@@ -68,12 +74,13 @@ def extract_episode_id(sample: dict[str, Any]) -> int | None:
     return None
 
 
-def infer_episode_id_from_dataset(dataset: Any, sample_idx: int) -> int | None:
-    """Infer dataset-local episode id from a global sample/frame index.
+def infer_episode_span_from_dataset(dataset: Any, sample_idx: int) -> tuple[int, int, int] | None:
+    """Infer `(episode_id, episode_start, episode_end)` from a global sample/frame index.
 
     RobotVideoDataset returns training samples/windows, not raw episodes. Its returned
-    sample may not contain episode metadata, so we recover the episode by locating
-    sample_idx in episode_data_index.
+    sample may not contain episode metadata, so we recover the episode span by locating
+    sample_idx in `episode_data_index`. The episode-local timestep is then
+    `sample_idx - episode_start`.
     """
     base_dataset = getattr(dataset, "lerobot_dataset", None)
     episode_data_index = getattr(base_dataset, "episode_data_index", None)
@@ -91,8 +98,10 @@ def infer_episode_id_from_dataset(dataset: Any, sample_idx: int) -> int | None:
         ends = ends.cpu().numpy()
 
     for ep_idx, (start, end) in enumerate(zip(starts, ends)):
-        if int(start) <= int(sample_idx) < int(end):
-            return int(ep_idx)
+        start_i = int(start)
+        end_i = int(end)
+        if start_i <= int(sample_idx) < end_i:
+            return int(ep_idx), start_i, end_i
     return None
 
 
@@ -189,6 +198,11 @@ def main():
 
     model = instantiate(cfg.model, model_dtype=torch.bfloat16, device=args.device)
     print("[probe-debug] instantiated model type =", type(model))
+    if args.inference_mode == "idm" and model.__class__.__name__ != "FastWAMIDM":
+        raise TypeError(
+            "--inference_mode idm requires the real FastWAMIDM inference path. "
+            f"Got model type {type(model)!r}; refusing to fall back to default FastWAM infer_action/infer_joint."
+        )
     if hasattr(model, "load_checkpoint"):
         model.load_checkpoint(args.checkpoint)
     else:
@@ -225,7 +239,7 @@ def main():
     processor: FastWAMProcessor = instantiate(cfg.data.train.processor).eval()
     processor.set_normalizer_from_stats(load_dataset_stats_from_json(stats_path))
 
-    rep_keys = ["video_pre", "video_out", "action_pre", "action_out", "context", "proprio_embed"]
+    rep_keys = [r.strip() for r in args.representations.split(",") if r.strip()]
     feat_buf = {k: [] for k in rep_keys}
     label_buf = {k: [] for k in ("effect", "stage", "target")}
     metadata = []
@@ -235,19 +249,23 @@ def main():
 
     for idx in range(0, max_items, stride):
         sample = dataset[idx]
-        episode_id = extract_episode_id(sample)
-        if episode_id is None:
-            episode_id = infer_episode_id_from_dataset(dataset, idx)
+        episode_span = infer_episode_span_from_dataset(dataset, idx)
+        sample_episode_id = extract_episode_id(sample)
+        if episode_span is None:
+            if sample_episode_id is None:
+                logger.info("Skipping sample %s because episode id could not be determined", idx)
+                continue
+            episode_key = int(sample_episode_id)
+            episode_len = int(sample.get("episode_len", sample.get("length", sample["video"].shape[0])))
+            timestep = int(sample.get("timestep", min(idx, episode_len - 1)))
+        else:
+            episode_key, episode_start, episode_end = episode_span
+            episode_len = max(1, int(episode_end) - int(episode_start))
+            timestep = int(idx) - int(episode_start)
         episode_blocks = label_cfg.get("episodes", {}) or label_cfg.get("tasks", {})
-        if episode_id is None:
-            logger.info("Skipping sample %s because episode id could not be determined", idx)
-            continue
-        episode_key = int(episode_id)
         if episode_key not in episode_blocks:
             logger.info("Skipping episode %s without label config", episode_key)
             continue
-        episode_len = int(sample.get("episode_len", sample.get("length", sample["video"].shape[0])))
-        timestep = int(sample.get("timestep", min(idx, episode_len - 1)))
         try:
             x, proprio, prompt, context, context_mask = normalize_obs_to_model_input(sample, processor, args.device, model.torch_dtype)
         except Exception as exc:
@@ -290,10 +308,16 @@ def main():
             logger.warning("No probe features captured for sample idx=%s", idx)
             continue
 
+        missing_reps = [rep for rep in rep_keys if rep not in feats]
+        if missing_reps:
+            logger.warning("Skipping sample %s because representations are missing: %s", idx, missing_reps)
+            continue
+        if args.dry_run or args.print_feature_shapes:
+            logger.info("Probe feature shapes for sample %s: %s", idx, {k: tuple(feats[k].shape) for k in rep_keys})
+
         span = pick_label(episode_blocks[episode_key], timestep, episode_len)
         for rep in rep_keys:
-            if rep in feats:
-                feat_buf[rep].append(feats[rep].squeeze(0).clone())
+            feat_buf[rep].append(feats[rep].squeeze(0).clone())
         for label_key in label_buf:
             label_buf[label_key].append(torch.tensor(label_maps[label_key][span[label_key]], dtype=torch.long))
         metadata.append({
@@ -307,6 +331,16 @@ def main():
         })
         if args.dry_run and len(metadata) >= 3:
             break
+
+    n_meta = len(metadata)
+    for rep, values in feat_buf.items():
+        if not values:
+            logger.warning("Representation %s is completely empty in collected features", rep)
+        elif len(values) != n_meta:
+            raise RuntimeError(f"Feature/metadata length mismatch for {rep}: {len(values)} vs {n_meta}")
+    for label_key, values in label_buf.items():
+        if len(values) != n_meta:
+            raise RuntimeError(f"Label/metadata length mismatch for {label_key}: {len(values)} vs {n_meta}")
 
     payload = {
         "features": {k: torch.stack(v) if len(v) else torch.empty((0,)) for k, v in feat_buf.items()},

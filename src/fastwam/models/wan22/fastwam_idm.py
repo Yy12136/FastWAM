@@ -370,12 +370,17 @@ class FastWAMIDM(FastWAMJoint):
                 )
             context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
             context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("context", context)
+            self._maybe_cache_probe_tensor("context_pure", context)
         if proprio is not None:
             context, context_mask = self._append_proprio_to_context(
                 context=context,
                 context_mask=context_mask,
                 proprio=proprio,
             )
+        if self.enable_probe:
+            self._maybe_cache_probe_tensor("context_with_proprio", context)
 
         # Stage 1: denoise video only.
         infer_timesteps_video, infer_deltas_video = self.infer_video_scheduler.build_inference_schedule(
@@ -418,7 +423,6 @@ class FastWAMIDM(FastWAMJoint):
         if self.enable_probe:
             self._maybe_cache_probe_tensor("video_pre", video_pre_cond.get("tokens"))
             self._maybe_cache_probe_tensor("action_pre", action_pre.get("tokens"))
-            self._maybe_cache_probe_tensor("context", video_pre_cond.get("context"))
             if proprio is not None and self.proprio_encoder is not None:
                 try:
                     self._maybe_cache_probe_tensor(

@@ -14,7 +14,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--features_path", required=True)
     p.add_argument("--target", required=True, choices=["effect", "stage", "target"])
-    p.add_argument("--representations", default="video_pre,video_out,action_pre,action_out,context,proprio_embed")
+    p.add_argument("--representations", default="video_pre,video_out,action_pre,action_out,context_pure,context_with_proprio,proprio_embed")
+    p.add_argument("--control_modes", default="rep,time,rep_time,residual")
+    p.add_argument("--time_degree", type=int, default=3)
     p.add_argument("--probe_type", default="linear", choices=["linear", "mlp"])
     p.add_argument("--episode_split", default="0.7,0.15,0.15")
     p.add_argument("--seed", type=int, default=42)
@@ -42,20 +44,62 @@ def split_by_episode(groups: np.ndarray, seed: int, split: str):
     n_train = max(1, int(round(n * ratios[0])))
     n_val = max(1, int(round(n * ratios[1])))
     if n_train + n_val >= n:
-        n_val = max(1, min(n - n_train - 1, n_val))
+        n_val = max(0, min(n - n_train - 1, n_val))
     train_groups = set(uniq[:n_train])
     val_groups = set(uniq[n_train:n_train + n_val])
     test_groups = set(uniq[n_train + n_val:])
     tr = np.array([g in train_groups for g in groups])
     va = np.array([g in val_groups for g in groups])
     te = np.array([g in test_groups for g in groups])
+    if not tr.any() or not te.any():
+        raise ValueError(
+            f"Empty train/test split: episodes={n}, train_samples={int(tr.sum())}, test_samples={int(te.sum())}."
+        )
     return tr, va, te
 
 
-def train_probe(X, y, groups, probe_type, seed, epochs, batch_size, lr, split, shuffle_labels=False):
+def standardize_from_train(X: np.ndarray, tr: np.ndarray):
+    mean = X[tr].mean(axis=0, keepdims=True)
+    std = X[tr].std(axis=0, keepdims=True)
+    std = np.where(std < 1e-6, 1.0, std)
+    return (X - mean) / std
+
+
+def make_time_features(metadata: list[dict], degree: int):
+    progress = np.array(
+        [m.get("timestep", 0) / max(1, m.get("episode_len", 1) - 1) for m in metadata],
+        dtype=np.float32,
+    )
+    degree = max(1, int(degree))
+    return np.stack([progress ** d for d in range(1, degree + 1)], axis=1)
+
+
+def residualize_representation(X_rep: np.ndarray, X_time: np.ndarray, tr: np.ndarray):
+    design = np.concatenate([np.ones((X_time.shape[0], 1), dtype=X_time.dtype), X_time], axis=1)
+    coef, *_ = np.linalg.lstsq(design[tr], X_rep[tr], rcond=None)
+    return X_rep - design @ coef
+
+
+def prepare_features(X_rep: np.ndarray | None, X_time: np.ndarray, tr: np.ndarray, mode: str):
+    X_time_std = standardize_from_train(X_time.astype(np.float32), tr)
+    if mode == "time":
+        return X_time_std
+    if X_rep is None:
+        raise ValueError(f"control_mode={mode} requires representation features")
+    X_rep = X_rep.astype(np.float32)
+    if mode == "rep":
+        return standardize_from_train(X_rep, tr)
+    if mode == "rep_time":
+        return np.concatenate([standardize_from_train(X_rep, tr), X_time_std], axis=1)
+    if mode == "residual":
+        residual = residualize_representation(X_rep, X_time_std, tr)
+        return standardize_from_train(residual.astype(np.float32), tr)
+    raise ValueError(f"Unknown control mode: {mode}")
+
+
+def train_probe(X, y, tr, va, te, probe_type, seed, epochs, batch_size, lr, shuffle_labels=False):
     torch.manual_seed(seed)
     np.random.seed(seed)
-    tr, va, te = split_by_episode(groups, seed, split)
     y_train = y[tr].copy()
     if shuffle_labels:
         rng = np.random.default_rng(seed)
@@ -64,9 +108,12 @@ def train_probe(X, y, groups, probe_type, seed, epochs, batch_size, lr, split, s
     model = make_probe(X.shape[1], num_classes, probe_type)
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     loss_fn = nn.CrossEntropyLoss()
-    train_loader = DataLoader(TensorDataset(torch.tensor(X[tr]).float(), torch.tensor(y_train).long()), batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(X[tr]).float(), torch.tensor(y_train).long()),
+        batch_size=batch_size,
+        shuffle=True,
+    )
     val_x = torch.tensor(X[va]).float()
-    val_y = torch.tensor(y[va]).long()
     for _ in range(epochs):
         model.train()
         for xb, yb in train_loader:
@@ -80,51 +127,86 @@ def train_probe(X, y, groups, probe_type, seed, epochs, batch_size, lr, split, s
                 _ = model(val_x)
     model.eval()
     with torch.no_grad():
-        test_x = torch.tensor(X[te]).float()
-        logits = model(test_x)
+        logits = model(torch.tensor(X[te]).float())
         pred = logits.argmax(dim=1).cpu().numpy()
-    return pred, te, tr, va
+    return pred
 
 
-def time_baseline(features, y, groups, seed, split):
-    progress = np.array([m.get("timestep", 0) / max(1, m.get("episode_len", 1) - 1) for m in features["metadata"]], dtype=np.float32)
-    X = progress[:, None]
-    pred, te, _, _ = train_probe(X, y, groups, "linear", seed, 20, 64, 1e-2, split, shuffle_labels=False)
-    return pred, te
+def compute_metrics(y_true: np.ndarray, pred: np.ndarray):
+    if len(y_true) == 0:
+        return {"acc": float("nan"), "balanced_acc": float("nan"), "macro_f1": float("nan")}
+    return {
+        "acc": float(accuracy_score(y_true, pred)),
+        "balanced_acc": float(balanced_accuracy_score(y_true, pred)),
+        "macro_f1": float(f1_score(y_true, pred, average="macro", zero_division=0)),
+    }
 
 
 def main():
     args = parse_args()
     payload = torch.load(args.features_path, map_location="cpu")
     rep_names = [r.strip() for r in args.representations.split(",") if r.strip()]
+    control_modes = [m.strip() for m in args.control_modes.split(",") if m.strip()]
     y = payload["labels"][args.target].cpu().numpy()
     groups = np.array([m["episode_id"] for m in payload["metadata"]])
+    tr, va, te = split_by_episode(groups, args.seed, args.episode_split)
+    y_test = y[te]
+    X_time = make_time_features(payload["metadata"], args.time_degree)
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    time_done = False
     for rep in rep_names:
-        X = payload["features"][rep].cpu().numpy()
-        pred, te, tr, _ = train_probe(X, y, groups, args.probe_type, args.seed, args.epochs, args.batch_size, args.lr, args.episode_split)
-        y_test = y[te]
+        if rep not in payload["features"]:
+            raise KeyError(f"Representation {rep!r} not found in {args.features_path}")
+        X_rep = payload["features"][rep].cpu().numpy()
+        for mode in control_modes:
+            if mode == "time":
+                if time_done:
+                    continue
+                row_rep = "time"
+                X = prepare_features(None, X_time, tr, mode)
+                time_done = True
+            else:
+                row_rep = rep
+                X = prepare_features(X_rep, X_time, tr, mode)
 
-        rand_pred, _, _, _ = train_probe(X, y, groups, args.probe_type, args.seed, args.epochs, args.batch_size, args.lr, args.episode_split, shuffle_labels=True)
-        time_pred, time_te = time_baseline(payload, y, groups, args.seed, args.episode_split)
-
-        rows.append({
-            "representation": rep,
-            "target": args.target,
-            "probe_type": args.probe_type,
-            "acc": float(accuracy_score(y_test, pred)) if len(y_test) else float("nan"),
-            "balanced_acc": float(balanced_accuracy_score(y_test, pred)) if len(y_test) else float("nan"),
-            "macro_f1": float(f1_score(y_test, pred, average="macro")) if len(y_test) else float("nan"),
-            "random_label_acc": float(accuracy_score(y_test, rand_pred)) if len(y_test) else float("nan"),
-            "time_baseline_acc": float(accuracy_score(y[y_t := time_te], time_pred)) if len(time_te) else float("nan"),
-            "num_train": int(tr.sum()),
-            "num_test": int(te.sum()),
-        })
-        cm = confusion_matrix(y_test, pred) if len(y_test) else np.zeros((1, 1), dtype=int)
-        np.save(out_dir / f"{rep}_{args.target}_confusion.npy", cm)
+            pred = train_probe(X, y, tr, va, te, args.probe_type, args.seed, args.epochs, args.batch_size, args.lr)
+            rand_pred = train_probe(
+                X,
+                y,
+                tr,
+                va,
+                te,
+                args.probe_type,
+                args.seed,
+                args.epochs,
+                args.batch_size,
+                args.lr,
+                shuffle_labels=True,
+            )
+            metric = compute_metrics(y_test, pred)
+            rand_metric = compute_metrics(y_test, rand_pred)
+            rows.append({
+                "representation": row_rep,
+                "target": args.target,
+                "control_mode": mode,
+                "probe_type": args.probe_type,
+                "seed": args.seed,
+                "acc": metric["acc"],
+                "balanced_acc": metric["balanced_acc"],
+                "macro_f1": metric["macro_f1"],
+                "random_label_acc": rand_metric["acc"],
+                "random_label_balanced_acc": rand_metric["balanced_acc"],
+                "random_label_macro_f1": rand_metric["macro_f1"],
+                "num_train": int(tr.sum()),
+                "num_test": int(te.sum()),
+            })
+            labels = np.arange(int(y.max()) + 1)
+            cm = confusion_matrix(y_test, pred, labels=labels)
+            np.save(out_dir / f"{row_rep}_{args.target}_{mode}_confusion.npy", cm)
 
     csv_path = out_dir / f"probe_{args.target}.csv"
     with open(csv_path, "w", newline="") as f:
