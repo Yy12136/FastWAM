@@ -417,7 +417,6 @@ class FastWAMIDM(FastWAMJoint):
         )
         if self.enable_probe:
             self._maybe_cache_probe_tensor("video_pre", video_pre_cond.get("tokens"))
-            self._maybe_cache_probe_tensor("video_out", latents_video)
             self._maybe_cache_probe_tensor("action_pre", action_pre.get("tokens"))
             self._maybe_cache_probe_tensor("context", video_pre_cond.get("context"))
             if proprio is not None and self.proprio_encoder is not None:
@@ -435,16 +434,30 @@ class FastWAMIDM(FastWAMJoint):
             video_tokens_per_frame=int(video_pre_cond["meta"]["tokens_per_frame"]),
             device=video_pre_cond["tokens"].device,
         )
-        video_kv_cache = self.mot.prefill_video_cache(
-            video_tokens=video_pre_cond["tokens"],
-            video_freqs=video_pre_cond["freqs"],
-            video_t_mod=video_pre_cond["t_mod"],
-            video_context_payload={
-                "context": video_pre_cond["context"],
-                "mask": video_pre_cond["context_mask"],
-            },
-            video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
-        )
+        if self.enable_probe:
+            video_kv_cache, video_out_tokens = self.mot.prefill_video_cache(
+                video_tokens=video_pre_cond["tokens"],
+                video_freqs=video_pre_cond["freqs"],
+                video_t_mod=video_pre_cond["t_mod"],
+                video_context_payload={
+                    "context": video_pre_cond["context"],
+                    "mask": video_pre_cond["context_mask"],
+                },
+                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+                return_tokens=True,
+            )
+            self._maybe_cache_probe_tensor("video_out", video_out_tokens)
+        else:
+            video_kv_cache = self.mot.prefill_video_cache(
+                video_tokens=video_pre_cond["tokens"],
+                video_freqs=video_pre_cond["freqs"],
+                video_t_mod=video_pre_cond["t_mod"],
+                video_context_payload={
+                    "context": video_pre_cond["context"],
+                    "mask": video_pre_cond["context_mask"],
+                },
+                video_attention_mask=attention_mask[:video_seq_len, :video_seq_len],
+            )
 
         infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
             num_inference_steps=num_inference_steps,
@@ -464,11 +477,6 @@ class FastWAMIDM(FastWAMJoint):
                 video_seq_len=video_seq_len,
             )
             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
-            if self.enable_probe:
-                self._maybe_cache_probe_tensor("action_out", latents_action)
-
-        if self.enable_probe:
-            self._maybe_cache_probe_tensor("action_out", latents_action)
 
         return {
             "video": self._decode_latents(latents_video, tiled=tiled),
