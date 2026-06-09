@@ -261,7 +261,8 @@ class MoT(nn.Module):
         video_t_mod: torch.Tensor,
         video_context_payload: Optional[dict],
         video_attention_mask: torch.Tensor,
-    ) -> list[dict[str, torch.Tensor]]:
+        return_tokens: bool = False,
+    ) -> list[dict[str, torch.Tensor]] | tuple[list[dict[str, torch.Tensor]], torch.Tensor]:
         """Prefill video branch once and cache per-layer K/V for action denoising.
 
         Args:
@@ -272,12 +273,14 @@ class MoT(nn.Module):
                 - `context`: encoder states [B, L, D]
                 - `mask`: attention mask [B, Sv, L] or [B, 1, Sv, L]
             video_attention_mask: Video self-attention mask, shape [Sv, Sv].
+            return_tokens: If True, also return final video tokens after all prefill layers.
 
         Returns:
-            Layer-wise cache list with length `num_layers`.
+            By default, layer-wise cache list with length `num_layers`.
             Each entry contains:
                 - `k`: video key tensor [B, Sv, H*Dh]
                 - `v`: video value tensor [B, Sv, H*Dh]
+            If `return_tokens=True`, returns `(kv_cache, x)` where `x` is final video tokens [B, Sv, D].
         """
         if "video" not in self.mixtures:
             raise ValueError("MoT requires `video` expert for `prefill_video_cache`.")
@@ -338,6 +341,8 @@ class MoT(nn.Module):
                 context_payload=video_context_payload,
             )
             kv_cache.append({"k": k, "v": v})
+        if return_tokens:
+            return kv_cache, x
         return kv_cache
 
     def forward_action_with_video_cache(
