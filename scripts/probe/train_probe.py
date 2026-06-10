@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--features_path", required=True)
-    p.add_argument("--target", required=True, choices=["effect", "stage", "target"])
+    p.add_argument("--target", required=True)
     p.add_argument("--representations", default="video_pre,video_out,action_pre,action_out,context_pure,context_with_proprio,proprio_embed")
     p.add_argument("--control_modes", default="rep,time,rep_time,residual")
     p.add_argument("--time_degree", type=int, default=3)
