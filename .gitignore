@@ -9,6 +9,8 @@ runs
 runs/
 evaluate_results/
 .deepspeed*
+eval_outputs/
+models/
 
 
 # ai coding

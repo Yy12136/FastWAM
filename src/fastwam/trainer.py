@@ -62,10 +62,14 @@ class Wan22Trainer:
             step_scheduler_with_optimizer=False,
         )
         
+        deepspeed_plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        zero_stage = "unknown"
+        if deepspeed_plugin is not None:
+            zero_stage = deepspeed_plugin.deepspeed_config.get("zero_optimization", {}).get("stage", "unknown")
         logger.info(
             "Accelerate training: distributed_type=%s zero_stage=%s world_size=%d process_index=%d cfg_mixed_precision=%s accelerator_mixed_precision=%s grad_accum=%d grad_clip=%.4f",
             self.accelerator.distributed_type,
-            self.accelerator.state.deepspeed_plugin.deepspeed_config.get("zero_optimization", {}).get("stage", "unknown"),
+            zero_stage,
             self.accelerator.num_processes,
             self.accelerator.process_index,
             self.mixed_precision,

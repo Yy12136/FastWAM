@@ -235,8 +235,17 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
             ) from last_exception
 
         # Get data from lerobot, organized in nested dict
+        episode_idx = int(np.searchsorted(self.episode_data_index["to"].cpu().numpy(), sample_idx, side="right"))
+        episode_start = int(self.episode_data_index["from"][episode_idx].item())
+        episode_end = int(self.episode_data_index["to"][episode_idx].item())
+        episode_len = max(episode_end - episode_start, 1)
+        timestep = int(sample_idx - episode_start)
         sample = {
             "idx": sample_idx,
+            "episode_idx": episode_idx,
+            "episode_id": episode_idx,
+            "episode_timestep": timestep,
+            "episode_ratio": float(timestep / max(episode_len - 1, 1)),
             "task": lerobot_sample["task"],
             "action": {},
             "state": {},

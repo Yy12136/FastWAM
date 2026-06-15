@@ -1,5 +1,8 @@
 # @package _global_
 
+# Plain LIBERO-10 few-shot IDM training on the annotated few-shot episode ids.
+# This uses labeled-only sampling but disables factor auxiliary losses.
+
 defaults:
   - override /data: libero_2cam
   - override /model: fastwam_idm
@@ -11,9 +14,11 @@ gradient_accumulation_steps: 2
 fewshot_demos_per_task: 5
 
 model:
-  use_factor_aux_loss: true
+  use_factor_aux_loss: false
   lambda_effect: 0.05
   lambda_target: 0.05
+  # Used only to select the annotated episode ids for plain fine-tuning.
+  # Auxiliary losses remain disabled because use_factor_aux_loss=false.
   factor_annotation_path: outputs/probe/annotations/effect_labels_first5.yaml
 
 data:

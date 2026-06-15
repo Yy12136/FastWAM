@@ -44,6 +44,7 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         override_instruction: Optional[str] = None, # whether to hardcode a specific instruction for all samples, for debugging
         selected_tasks: Optional[list[str]] = None,
         max_episodes_per_task: Optional[int] = None,
+        factor_aux_only_labeled_samples: bool = False,
     ):
         self.lerobot_dataset = BaseLerobotDataset(
             dataset_dirs=dataset_dirs,
@@ -76,6 +77,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         self.max_padding_retry = max_padding_retry
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
+        self.factor_aux_label_map = {"effect": {}, "target": {}}
+        self.factor_aux_episodes = {}
+        self.factor_aux_only_labeled_samples = bool(factor_aux_only_labeled_samples)
+        self.factor_aux_sample_indices = None
+        self._episode_boundaries_np = self.lerobot_dataset.episode_data_index["to"].cpu().numpy()
 
         self.resize_transform = ResizeSmallestSideAspectPreserving(
             args={"img_w": self.video_size[1], "img_h": self.video_size[0]},
@@ -114,10 +120,87 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             self.lerobot_dataset.set_processor(processor)
         
     def __len__(self):
+        if self.factor_aux_sample_indices is not None:
+            return len(self.factor_aux_sample_indices)
         return len(self.lerobot_dataset)
 
+    def set_factor_aux_labels(self, factor_aux_label_map, factor_aux_episodes):
+        self.factor_aux_label_map = factor_aux_label_map or {"effect": {}, "target": {}}
+        self.factor_aux_episodes = factor_aux_episodes or {}
+        if self.factor_aux_only_labeled_samples:
+            self._build_factor_aux_sample_indices()
+        return self
+
+    def _build_factor_aux_sample_indices(self):
+        labeled_episode_ids = sorted(int(key) for key in self.factor_aux_episodes.keys())
+        sample_indices = []
+        episode_from = self.lerobot_dataset.episode_data_index["from"].cpu().numpy()
+        episode_to = self.lerobot_dataset.episode_data_index["to"].cpu().numpy()
+        num_episodes = len(episode_to)
+        matched_episodes = 0
+        for episode_id in labeled_episode_ids:
+            if episode_id < 0 or episode_id >= num_episodes:
+                continue
+            labels = self.factor_aux_episodes.get(episode_id, {}).get("labels", [])
+            if not labels:
+                continue
+            start = int(episode_from[episode_id])
+            end = int(episode_to[episode_id])
+            if end > start:
+                sample_indices.extend(range(start, end))
+                matched_episodes += 1
+        self.factor_aux_sample_indices = sample_indices
+        logger.info(
+            "Factor auxiliary labeled-only sampling enabled: annotated_episodes=%d matched_episodes=%d samples=%d original_samples=%d",
+            len(labeled_episode_ids),
+            matched_episodes,
+            len(sample_indices),
+            len(self.lerobot_dataset),
+        )
+        if not self.factor_aux_sample_indices:
+            raise ValueError(
+                "factor_aux_only_labeled_samples=true but no labeled samples matched the dataset. "
+                "Check whether factor annotation episode ids match the dataset episode ids."
+            )
+
+    def _get_factor_aux_labels(self, episode_id, episode_ratio):
+        episode_payload = self.factor_aux_episodes.get(int(episode_id))
+        if episode_payload is None:
+            return None, None
+        labels = episode_payload.get("labels", [])
+        if not labels:
+            return None, None
+        chosen = None
+        for label in labels:
+            start_ratio = float(label.get("start_ratio", 0.0))
+            end_ratio = float(label.get("end_ratio", 1.0))
+            if episode_ratio >= start_ratio and episode_ratio < end_ratio:
+                chosen = label
+                break
+        if chosen is None:
+            chosen = labels[-1]
+        effect_name = chosen.get("effect")
+        target_name = chosen.get("target")
+        effect_idx = self.factor_aux_label_map.get("effect", {}).get(effect_name)
+        target_idx = self.factor_aux_label_map.get("target", {}).get(target_name)
+        return effect_idx, target_idx
+
+    def _get_episode_info(self, sample_idx):
+        episode_idx = int(np.searchsorted(self._episode_boundaries_np, sample_idx, side="right"))
+        episode_start = int(self.lerobot_dataset.episode_data_index["from"][episode_idx].item())
+        episode_end = int(self.lerobot_dataset.episode_data_index["to"][episode_idx].item())
+        episode_len = max(episode_end - episode_start, 1)
+        timestep = int(sample_idx - episode_start)
+        episode_ratio = float(timestep / max(episode_len - 1, 1))
+        return episode_idx, episode_ratio
+
+    def _resolve_sample_idx(self, idx):
+        if self.factor_aux_sample_indices is not None:
+            return int(self.factor_aux_sample_indices[int(idx)])
+        return int(idx)
+
     def _get(self, idx):
-        sample_idx = idx
+        sample_idx = self._resolve_sample_idx(idx)
         sample = None
         for attempt in range(self.max_padding_retry + 1):
             sample = self.lerobot_dataset[sample_idx]
@@ -224,6 +307,11 @@ class RobotVideoDataset(torch.utils.data.Dataset):
         context[~context_mask] = 0.0
         context_mask = torch.ones_like(context_mask)
         
+        episode_id, episode_ratio = self._get_episode_info(sample_idx)
+        factor_aux_effect_label, factor_aux_target_label = self._get_factor_aux_labels(
+            episode_id, episode_ratio
+        )
+
         data = {
             "video": video,
             "action": action,
@@ -234,6 +322,8 @@ class RobotVideoDataset(torch.utils.data.Dataset):
             "image_is_pad": image_is_pad,
             "action_is_pad": sample["action_is_pad"],
             "proprio_is_pad": sample["proprio_is_pad"],
+            "factor_aux_effect_label": torch.tensor(-1, dtype=torch.long) if factor_aux_effect_label is None else torch.tensor(factor_aux_effect_label, dtype=torch.long),
+            "factor_aux_target_label": torch.tensor(-1, dtype=torch.long) if factor_aux_target_label is None else torch.tensor(factor_aux_target_label, dtype=torch.long),
         }
         return data
 

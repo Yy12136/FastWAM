@@ -31,6 +31,14 @@ max_grad_norm: 1.0
 weight_decay: 0.0
 resume: null
 
+# factor auxiliary loss
+# These root-level aliases are copied into `model.*` in `run_training`, so they can be
+# overridden from command line as `use_factor_aux_loss=true lambda_effect=...`.
+use_factor_aux_loss: false
+factor_annotation_path: null
+lambda_effect: 0.05
+lambda_target: 0.05
+
 # wandb
 wandb:
   enabled: false
